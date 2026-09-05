@@ -13,6 +13,8 @@
 //           libctru services/apt.h (NS_APPID, APT_GetAppletInfo).
 // TODO(hardware): non validé sur console/Citra (cf apt_monitor.c).
 
+// Lit aussi les lignes "exclude=<TitleID>" de config.txt : un jeu exclu est
+// remonté comme PRESENCE_KIND_IDLE (jamais publié sur Discord ni affiché).
 Result aptMonitorInit(void);
 Result aptMonitorGetCurrentState(presence_state_t *out);
 Result aptMonitorGetActiveTitleId(u64 *outTitleId);

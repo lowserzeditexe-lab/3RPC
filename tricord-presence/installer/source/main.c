@@ -29,6 +29,11 @@
 #define CONFIG_DIR     "sdmc:/3ds/tricord-presence"
 #define CONFIG_FILE    CONFIG_DIR "/config.txt"
 #define TITLES_FILE    CONFIG_DIR "/titles.txt"
+#define LOG_FILE       CONFIG_DIR "/log.txt"
+// exheader.bin résiduels d'anciens essais d'auto-boot (méthode NON retenue,
+// cf RAPPORT.md) : NS (0004013000008002) et notre propre Title ID.
+#define EXH_NS_FILE    "sdmc:/luma/titles/0004013000008002/exheader.bin"
+#define EXH_SELF_FILE  "sdmc:/luma/titles/000401300F000102/exheader.bin"
 
 static bool fileExists(const char *path) {
     struct stat st;
@@ -114,6 +119,8 @@ static bool writeConfig(const char *token) {
     fprintf(f, "# TriCord Presence - config\n");
     fprintf(f, "# Ce fichier contient votre token Discord : ne le partagez jamais.\n");
     fprintf(f, "token=%s\n", token);
+    fprintf(f, "# Jeux a ne jamais publier (Title ID hex, une ligne par jeu ou separes par des virgules) :\n");
+    fprintf(f, "# exclude=0004000000030700\n");
     fclose(f);
     return true;
 }
@@ -147,6 +154,69 @@ static Result launchSysmoduleNow(void) {
     return rc;
 }
 
+static bool removeIfExists(const char *path) {
+    if (!fileExists(path)) { printf("  absent : %s\n", path); return true; }
+    if (remove(path) != 0) { printf("  ERREUR suppression %s (errno %d)\n", path, errno); return false; }
+    printf("  supprime: %s\n", path);
+    return true;
+}
+
+// Désinstallation : retire tout ce que l'installeur a pu écrire, avec
+// confirmation par groupe. Le sysmodule déjà lancé en mémoire s'arrête au
+// prochain reboot (pas de terminaison à chaud : il faudrait pm:app
+// TerminateTitle, non implémenté).
+static void uninstall(void) {
+    bool ok = true;
+    printf("\n=== Desinstallation ===\n");
+
+    if (promptYesNo("\n[1/4] Supprimer le sysmodule (/luma/sysmodules/000401300F000102.cxi) ?"))
+        ok &= removeIfExists(SYSMODULE_DEST);
+
+    if (fileExists(PLUGIN_DEST)) {
+        printf("\n[2/4] %s\n  (impossible de verifier qu'il s'agit bien du plugin TriCord)\n", PLUGIN_DEST);
+        if (promptYesNo("  Supprimer ce plugin 'default' ?")) ok &= removeIfExists(PLUGIN_DEST);
+    } else {
+        printf("\n[2/4] plugin absent.\n");
+    }
+
+    if (promptYesNo("\n[3/4] Supprimer la config (token !), la base de titres et le log ?")) {
+        ok &= removeIfExists(CONFIG_FILE);
+        ok &= removeIfExists(TITLES_FILE);
+        ok &= removeIfExists(LOG_FILE);
+        if (rmdir(CONFIG_DIR) == 0) printf("  supprime: %s\n", CONFIG_DIR);
+    }
+
+    if (fileExists(EXH_NS_FILE) || fileExists(EXH_SELF_FILE)) {
+        printf("\n[4/4] exheader.bin residuel(s) detecte(s) dans /luma/titles/ :\n");
+        if (fileExists(EXH_NS_FILE))   printf("  %s\n", EXH_NS_FILE);
+        if (fileExists(EXH_SELF_FILE)) printf("  %s\n", EXH_SELF_FILE);
+        if (promptYesNo("  Les supprimer (recommande) ?")) {
+            ok &= removeIfExists(EXH_NS_FILE);
+            ok &= removeIfExists(EXH_SELF_FILE);
+            rmdir("sdmc:/luma/titles/0004013000008002");
+            rmdir("sdmc:/luma/titles/000401300F000102");
+        }
+    } else {
+        printf("\n[4/4] aucun exheader.bin residuel.\n");
+    }
+
+    printf(ok ? "\nDesinstallation terminee. Redemarrez la console.\n"
+              : "\nDesinstallation terminee AVEC ERREURS (voir ci-dessus).\n");
+}
+
+static int promptMode(void) {
+    printf("[A] Installer   [X] Desinstaller   [B] Quitter\n");
+    while (aptMainLoop()) {
+        hidScanInput();
+        u32 k = hidKeysDown();
+        if (k & KEY_A) return 1;
+        if (k & KEY_X) return 2;
+        if (k & KEY_B) return 0;
+        gspWaitForVBlank();
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -160,13 +230,12 @@ int main(int argc, char **argv) {
     printf("  2) copier le plugin overlay vers /luma/plugins/\n");
     printf("  3) copier la base de titres + creer la config\n");
     printf("     (saisie du token Discord au clavier)\n\n");
+    int mode = promptMode();
+    if (mode == 0) { printf("\nAnnule par l'utilisateur.\n"); goto wait_exit; }
+    if (mode == 2) { uninstall(); goto wait_exit; }
+
     if (R_FAILED(romfsRc)) {
         printf("ERREUR: romfs indisponible (%08lX) - build incomplet ?\n", (unsigned long)romfsRc);
-        goto wait_exit;
-    }
-
-    if (!promptYesNo("Continuer ?")) {
-        printf("\nAnnule par l'utilisateur.\n");
         goto wait_exit;
     }
 

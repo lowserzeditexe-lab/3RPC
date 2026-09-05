@@ -1,6 +1,8 @@
 #include "apt_monitor.h"
 #include <3ds.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "title_db.h"
 
 /*
@@ -18,7 +20,44 @@
 static const char *const s_aptServiceNames[3] = { "APT:S", "APT:A", "APT:U" };
 static int s_aptServiceIdx = -1;
 
+/*
+ * Filtre : Title IDs à ne jamais publier, lus dans config.txt (lignes
+ * "exclude=<TID hex>" répétables, ou "exclude=<TID>,<TID>"). Un jeu exclu
+ * est remonté comme PRESENCE_KIND_IDLE (statut idle, pas de nom de jeu).
+ */
+#define CONFIG_PATH   "sdmc:/3ds/tricord-presence/config.txt"
+#define MAX_EXCLUDES  64
+static u64 s_excludes[MAX_EXCLUDES];
+static int s_numExcludes = 0;
+
+static void loadExcludes(void) {
+    s_numExcludes = 0;
+    FILE *f = fopen(CONFIG_PATH, "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "exclude=", 8) != 0) continue;
+        char *p = line + 8;
+        while (*p && s_numExcludes < MAX_EXCLUDES) {
+            while (*p == ' ' || *p == ',') p++;
+            char *end;
+            u64 tid = strtoull(p, &end, 16);
+            if (end == p) break;
+            if (tid) s_excludes[s_numExcludes++] = tid;
+            p = end;
+        }
+    }
+    fclose(f);
+}
+
+static bool isExcluded(u64 tid) {
+    for (int i = 0; i < s_numExcludes; i++)
+        if (s_excludes[i] == tid) return true;
+    return false;
+}
+
 Result aptMonitorInit(void) {
+    loadExcludes();
     Handle h;
     for (int i = 0; i < 3; i++) {
         if (R_SUCCEEDED(srvGetServiceHandle(&h, s_aptServiceNames[i]))) {
@@ -118,6 +157,11 @@ Result aptMonitorGetCurrentState(presence_state_t *out) {
     if (R_FAILED(rc)) {
         out->kind = PRESENCE_KIND_UNKNOWN;
         return rc;
+    }
+
+    if (isExcluded(titleId)) {
+        out->kind = PRESENCE_KIND_IDLE; // jeu masqué par l'utilisateur (config.txt exclude=)
+        return 0;
     }
 
     out->kind = PRESENCE_KIND_IN_GAME;
