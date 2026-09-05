@@ -1,0 +1,19 @@
+{
+  "summary": "All 7 acceptance tests for the Nintendo 3DS homebrew 'TriCord Presence' passed. Full build and clean rebuild both exit 0 producing all required artifacts. ctrtool validates the CXI (title id 000401300f000102, APT:S/fs:USER/soc:U, Memory Type SYSTEM) and the CIA romfs (contains tricord_overlay.3gx, 000401300F000102.cxi, titles.txt). Host gateway test builds and connects to gateway.discord.gg, receives HELLO, sends IDENTIFY, receives expected close code 4004 (invalid token) and exits 0. gen_qr.py produces a single inline <svg> with 434 <rect> elements, no text/script/link nodes. titles.txt has 4206 lines all matching regex, sorted, no duplicates, Mario Kart 7 entry present. 9 TODO(hardware) markers remain (intentional), no literal Discord token hardcoded in C/C++.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "build.sh emits placeholder GitHub URL warning for dist/qr.html — expected behavior, must be re-run with real release URL before shipping.",
+    "Clean rebuild output shows some targets 'Nothing to be done' before rebuild — because installer/romfs was populated by prior build; the rm -f + clean sequence still works and rebuilds everything as verified in logs.",
+    "Ticket TitleId in the CIA is 000400000f000200 (installer app) while sysmodule TitleId 000401300f000102 is embedded as romfs asset — this is the correct design (installer copies the sysmodule to sdmc:/luma/sysmodules/)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "N/A"},
+  "test_credentials": "Fake Discord token 'FAKE.TOKEN' used intentionally; close code 4004 is the expected result.",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "This is a 3DS homebrew C/C++ project at /app/tricord-presence. Ignore the React/FastAPI template in /app. Always `source tools/env.sh` first (adds devkitARM + tools/bin to PATH). Build with ./build.sh; host protocol test at tools/host_gateway_test/gateway_test needs outbound HTTPS to gateway.discord.gg. All 7 tests from the review request currently pass."
+}

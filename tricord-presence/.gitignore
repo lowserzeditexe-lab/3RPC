@@ -1,0 +1,22 @@
+# dépôts tiers clonés par build.sh / tools/build_host_tools.sh
+third_party/
+# binaires hôte compilés (aarch64/x86 selon la machine)
+tools/bin/
+tools/host_gateway_test/gateway_test
+# sorties de compilation
+**/build/
+*.elf
+*.map
+*.o
+*.smdh
+*.icn
+*.bnr
+sysmodule/*.cxi
+plugin/*.3gx
+installer/*.3dsx
+installer/*.cia
+installer/romfs/*.cxi
+installer/romfs/*.3gx
+installer/.3dsdb_cache/
+installer/romfs/.3dsdb_cache/
+__pycache__/
