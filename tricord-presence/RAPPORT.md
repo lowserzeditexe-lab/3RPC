@@ -10,18 +10,55 @@ d'émulateur exécutable dans le conteneur). Tout ce qui touche à l'OS 3DS
 est donc marqué `TODO(hardware)` dans le code là où une validation réelle
 manque, avec la source utilisée pour chaque choix.
 
-Ce qui a **été validé réellement** :
+## 0. Clarification sur le test "Gateway Discord" (correction d'une formulation trompeuse)
+
+La version précédente de ce rapport parlait d'un client Gateway « exécuté avec
+succès contre la vraie gateway ». **C'était trompeur.** Les faits :
+
+- **Aucun token Discord valide n'a été utilisé ni disponible.** Le test hôte
+  (`tools/host_gateway_test/`) a été lancé avec la chaîne arbitraire
+  `token=FAKE.TOKEN.FOR_PROTOCOL_TEST` (et `FAKE.TOKEN` par l'agent de test),
+  écrite dans `/tmp/cfg` (hors projet, volatile). Aucun compte n'a été créé,
+  aucun token trouvé ou généré. Aucun fichier du projet ne contient cette
+  chaîne ; seul `test_reports/iteration_1.json` la mentionne en clair.
+- **Ce qui s'est réellement passé** : TCP + TLS 1.2 (SNI) établis vers
+  `gateway.discord.gg:443` → upgrade WebSocket accepté (`101`) → trame HELLO
+  (op 10, `heartbeat_interval=41250`) reçue et parsée → IDENTIFY (op 2)
+  envoyé → **Discord a fermé la connexion avec le code 4004 (Authentication
+  failed)**. L'IDENTIFY a donc été **rejeté**.
+- **Validé** : couche réseau (TLS + WS), réception/parsing de HELLO,
+  sérialisation d'IDENTIFY, réception/interprétation d'une trame CLOSE et
+  des codes fatals, backoff de reconnexion, et (depuis cette révision) la
+  vérification du certificat serveur.
+- **Non validé** : authentification, READY, heartbeat/HEARTBEAT_ACK, RESUME,
+  INVALID_SESSION, UPDATE PRESENCE (op 3), scanner READY volumineux (testé
+  uniquement sur un JSON synthétique). Tout cela n'a jamais été échangé avec
+  la Gateway.
+
+Sortie brute du test (relancé, `TRICORD_CONFIG=/tmp/cfg ./gateway_test 12`) :
+```
+scanner streaming: OK (chunks 1..64)
+[gateway] connexion à gateway.discord.gg
+[gateway] HELLO: heartbeat_interval=41250 ms
+[gateway] IDENTIFY envoyé
+[gateway] close reçu, code 4004
+[gateway] Authentification refusée (4004) : token invalide -> arrêt
+[gateway] thread gateway terminé (fatal=1)
+exit=0
+```
+
+Ce qui a **été validé réellement** dans l'ensemble du projet :
 - compilation sans erreur des 3 composants (`./build.sh`) → `.cxi`, `.3gx`,
   `.3dsx`, `.cia`, `dist/qr.html` ;
 - structure des binaires vérifiée avec `ctrtool` (exheader du sysmodule :
   Title ID, services, SVC, type mémoire ; CIA : exefs `.code/banner/icon/logo`
   + romfs) ;
-- **le client Gateway Discord complet (TLS + WebSocket + HELLO/IDENTIFY/
-  heartbeat/close codes) a été exécuté sur l'hôte Linux contre la vraie
-  `wss://gateway.discord.gg`** (même code source, `tools/host_gateway_test/`) :
-  handshake OK, HELLO reçu, IDENTIFY envoyé, fermeture 4004 (token bidon)
-  correctement interprétée comme fatale ; le scanner streaming du READY
-  volumineux passe ses tests unitaires (chunks de 1 à 64 octets).
+- couche TLS + WebSocket + HELLO/IDENTIFY/CLOSE du client Gateway, sur hôte
+  Linux, dans les limites décrites en §0 ci-dessus ;
+- vérification TLS : avec le bundle CA embarqué, le handshake vers
+  `gateway.discord.gg` réussit et un hôte auto-signé
+  (`self-signed.badssl.com`) est refusé (`-0x2700`, "not correctly signed by
+  the trusted CA").
 
 ---
 
@@ -71,10 +108,16 @@ Sur une machine normale, `dkp-pacman -S 3ds-dev 3ds-mbedtls 3ds-wslay
   Luma, utilisée par `rosalina/source/errdisp.c`), qui demanderait d'ajouter
   ces SVC au `.rsf`.
 
-### 2.2 `sysmodule/source/discord_gateway.c` — Gateway réelle ✅ (testé sur hôte)
-- TLS : mbedtls 2.28, TLS 1.2 min, SNI, `MBEDTLS_SSL_VERIFY_NONE`
-  (`TODO(hardware)` : pas de magasin de CA ; à durcir en embarquant la racine
-  de gateway.discord.gg).
+### 2.2 `sysmodule/source/discord_gateway.c` — Gateway ✅ code complet, ⚠️ testé sur hôte jusqu'à IDENTIFY/4004 seulement (cf §0)
+- TLS : mbedtls 2.28, TLS 1.2 min, SNI, **`MBEDTLS_SSL_VERIFY_REQUIRED`** avec
+  bundle de racines embarqué (`discord_ca_bundle.h`, généré par
+  `tools/gen_ca_bundle.py` depuis le magasin ca-certificates : GTS Root
+  R1-R4, GlobalSign Root CA, ISRG Root X1, DigiCert Global Root CA/G2,
+  Baltimore CyberTrust — chaîne observée en juin 2026 : discord.gg ← WE1 ←
+  GTS Root R4 ← GlobalSign Root CA) + contrôle du nom d'hôte. Testé sur hôte
+  (accepté : gateway.discord.gg ; refusé : self-signed.badssl.com).
+  `TODO(hardware)` : mbedtls compare les dates de validité à `time()` (RTC
+  3DS) ; une horloge très fausse fait échouer la connexion (motif loggé).
 - WebSocket : wslay en mode événementiel non-bloquant (`poll()` + sockets
   `O_NONBLOCK`, callbacks `mbedtls_ssl_read/write`).
 - Protocole : HELLO → IDENTIFY (token lu depuis `config.txt`, propriétés
@@ -83,9 +126,12 @@ Sur une machine normale, `dkp-pacman -S 3ds-dev 3ds-mbedtls 3ds-wslay
   `session_id` + `resume_gateway_url` ; RESUME (op 6) ; RECONNECT (op 7) ;
   INVALID_SESSION (op 9, attente 3 s puis re-IDENTIFY si non reprenable) ;
   codes de fermeture 4004 / 4010-4014 fatals ; backoff 5 s → 60 s.
-- Update Presence (op 3) : `{"since":null,"activities":[{"name":"<jeu>",
-  "type":0}],"status":"online","afk":false}` ; `activities: []` au menu
-  HOME ; coalescé et limité à 1 envoi / 15 s (limite Discord ~5/min).
+- Update Presence (op 3) : en jeu `{"since":null,"activities":[{"name":"<jeu>",
+  "type":0}],"status":"online","afk":false}` ; au menu HOME **`status:
+  "idle"` + statut personnalisé** `{"name":"Custom Status","type":4,
+  "state":"Sur le menu HOME"}` (type 4 = seul texte libre affiché pour un
+  compte utilisateur ; il **remplace le statut perso de l'utilisateur** tant
+  que le sysmodule tourne) ; coalescé et limité à 1 envoi / 15 s.
 - **Point deviné / à surveiller** : le READY d'un compte utilisateur peut
   peser plusieurs MiB, impossible à bufferiser dans 3 MiB de heap. wslay est
   configuré en `no_buffering` : un message est accumulé jusqu'à 96 KiB, au-
@@ -203,7 +249,7 @@ Sur une machine normale, `dkp-pacman -S 3ds-dev 3ds-mbedtls 3ds-wslay
 | 3 | `MemoryType System`/`sysapplet` vs `Base`/`Other` | `tricord_presenced.rsf` | moyen |
 | 4 | `svcConnectToPort("presence:d")` depuis un jeu, cohabitation avec le plugin loader | `presence_client.c` | faible |
 | 5 | Rendu OSD : 3D stéréo, wide mode, jeux à pipeline GSP atypique | `overlay_draw.cpp` | moyen |
-| 6 | TLS sans vérification de certificat | `discord_gateway.c` | sécurité |
+| 6 | Validité des certificats dépend de l'horloge RTC de la console ; rotation possible des racines Discord (regénérer le bundle) | `discord_gateway.c` | faible |
 | 7 | `Sec-WebSocket-Accept` non vérifié | `discord_gateway.c` | faible |
 | 8 | Comportement réel du READY utilisateur en streaming (taille, ordre des clés) | `discord_gateway.c` | moyen |
 | 9 | `svcControlService` + `pm:app LaunchTitle` depuis l'installeur (CIA ; depuis le .3dsx sous HBL, dépend des droits accordés par `hb:ldr`) | `installer/source/main.c` | moyen |
@@ -216,6 +262,9 @@ Sur une machine normale, `dkp-pacman -S 3ds-dev 3ds-mbedtls 3ds-wslay
   RESUME : Discord invalide la session sur 1000/1001.
 - Priorité/pile des threads (IPC 8 KiB, réseau 64 KiB, priorité 0x3F).
 - Intervalle de poll APT = 1 s ; toast 4 s.
+- Statut "idle" au menu HOME rendu via un statut personnalisé (type 4) : le
+  rendu exact côté client Discord pour un compte utilisateur n'a pas pu être
+  observé (pas de token).
 
 ## 5. Arborescence ajoutée / modifiée
 ```
@@ -223,7 +272,8 @@ build.sh                       chaîne complète (libctrpf → cxi → 3gx → 3
 sysmodule/tricord_presenced.rsf, source/log.[ch]        nouveaux
 plugin/3gx.ld, tricord_overlay.plgInfo, source/*.cpp    nouveaux / renommés (.c→.cpp)
 installer/tricord-presence-installer.rsf, source/csvc.s, assets/ (générés), romfs/titles.txt
-tools/env.sh, build_host_tools.sh, gen_assets.py, gen_titles_db.py, host_gateway_test/
+tools/env.sh, build_host_tools.sh, gen_assets.py, gen_titles_db.py, gen_ca_bundle.py, host_gateway_test/
+sysmodule/source/discord_ca_bundle.h   généré (racines CA)
 dist/gen_qr.py, qr.html, *.cia, *.3dsx, *.cxi, *.3gx, titles.txt
 ```
 `third_party/` (dépôts de référence clonés : Luma3DS, CTRPF, Project_CTR,

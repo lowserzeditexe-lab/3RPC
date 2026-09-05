@@ -35,6 +35,10 @@ if [ ! -f "$DEVKITPRO/libctrpf/lib/libctrpf.a" ]; then
 fi
 
 echo "== [1/3] Sysmodule (ELF -> CXI via makerom) =="
+# Bundle de racines CA (vérification TLS) : régénéré si absent ou REFRESH_CA=1
+if [ ! -f "$ROOT/sysmodule/source/discord_ca_bundle.h" ] || [ "${REFRESH_CA:-0}" = "1" ]; then
+    python3 "$ROOT/tools/gen_ca_bundle.py" /etc/ssl/certs "$ROOT/sysmodule/source/discord_ca_bundle.h"
+fi
 make -C "$ROOT/sysmodule"
 SYSMODULE_CXI="$ROOT/sysmodule/000401300F000102.cxi"
 [ -f "$SYSMODULE_CXI" ] || { echo "ERREUR: $SYSMODULE_CXI manquant" >&2; exit 1; }

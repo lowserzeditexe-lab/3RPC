@@ -21,8 +21,9 @@ typedef int32_t Result;
 //  - HEARTBEAT (op 1) / HEARTBEAT_ACK (op 11), détection de connexion zombie
 //  - READY -> session_id + resume_gateway_url ; RESUME (op 6) après coupure,
 //    RECONNECT (op 7), INVALID_SESSION (op 9)
-//  - UPDATE PRESENCE (op 3) : activité type 0 "Playing <jeu>", ou aucune
-//    activité quand la console est au menu HOME
+//  - UPDATE PRESENCE (op 3) : en jeu = status "online" + activité type 0
+//    "Playing <jeu>" ; menu HOME = status "idle" + statut personnalisé
+//    (type 4) "Sur le menu HOME"
 //  - codes de fermeture 4004/4010-4014 = fatals (pas de reconnexion)
 //
 // Rappel : token utilisateur -> usage "self-bot", risque ToS assumé.

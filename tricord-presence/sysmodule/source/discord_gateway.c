@@ -17,7 +17,9 @@
 #include <mbedtls/base64.h>
 #include <mbedtls/error.h>
 #include <mbedtls/net_sockets.h>
+#include <mbedtls/x509_crt.h>
 #include <wslay/wslay.h>
+#include "discord_ca_bundle.h"
 #include <jansson.h>
 
 /* ------------------------------------------------------------------------
@@ -68,6 +70,7 @@ typedef struct {
     int fd;
     mbedtls_ssl_context ssl;
     mbedtls_ssl_config conf;
+    mbedtls_x509_crt cacert;
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context drbg;
     wslay_event_context_ptr ws;
@@ -193,6 +196,7 @@ static int tcp_connect(const char *host) {
 static bool tls_connect(gw_t *g, const char *host) {
     mbedtls_ssl_init(&g->ssl);
     mbedtls_ssl_config_init(&g->conf);
+    mbedtls_x509_crt_init(&g->cacert);
     mbedtls_entropy_init(&g->entropy);
     mbedtls_ctr_drbg_init(&g->drbg);
 
@@ -204,10 +208,18 @@ static bool tls_connect(gw_t *g, const char *host) {
     if (mbedtls_ssl_config_defaults(&g->conf, MBEDTLS_SSL_IS_CLIENT,
                                     MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT) != 0)
         return false;
-    /* TODO(hardware): pas de magasin de CA embarqué (VERIFY_NONE). À durcir en
-     * embarquant la racine utilisée par gateway.discord.gg ou en passant par
-     * sslc: (magasin système) — la 3DS n'expose pas ses CA à mbedtls. */
-    mbedtls_ssl_conf_authmode(&g->conf, MBEDTLS_SSL_VERIFY_NONE);
+    /* Vérification du certificat serveur contre les racines embarquées
+     * (discord_ca_bundle.h, généré par tools/gen_ca_bundle.py) + contrôle du
+     * nom d'hôte (mbedtls_ssl_set_hostname ci-dessous). La 3DS n'expose pas
+     * son magasin de CA à mbedtls, d'où l'embarquement.
+     * TODO(hardware): mbedtls compare les dates de validité à time() (RTC de
+     * la console) : une horloge 3DS très fausse fait échouer la connexion
+     * (erreur MBEDTLS_X509_BADCERT_EXPIRED/FUTURE dans log.txt). */
+    int cr = mbedtls_x509_crt_parse(&g->cacert, (const unsigned char *)DISCORD_CA_BUNDLE, sizeof(DISCORD_CA_BUNDLE));
+    if (cr < 0) { GW_LOG("bundle CA invalide: -0x%04X", (unsigned)-cr); return false; }
+    if (cr > 0) GW_LOG("bundle CA: %d certificat(s) ignoré(s)", cr);
+    mbedtls_ssl_conf_ca_chain(&g->conf, &g->cacert, NULL);
+    mbedtls_ssl_conf_authmode(&g->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
     mbedtls_ssl_conf_rng(&g->conf, mbedtls_ctr_drbg_random, &g->drbg);
     mbedtls_ssl_conf_min_version(&g->conf, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_3);
 
@@ -224,6 +236,11 @@ static bool tls_connect(gw_t *g, const char *host) {
             continue;
         }
         GW_LOG("TLS handshake échoué: -0x%04X", (unsigned)-ret);
+        if (ret == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
+            char vbuf[256];
+            mbedtls_x509_crt_verify_info(vbuf, sizeof(vbuf), "  ", mbedtls_ssl_get_verify_result(&g->ssl));
+            GW_LOG("certificat refusé:\n%s", vbuf);
+        }
         return false;
     }
     return true;
@@ -233,6 +250,7 @@ static void tls_free(gw_t *g) {
     mbedtls_ssl_close_notify(&g->ssl);
     mbedtls_ssl_free(&g->ssl);
     mbedtls_ssl_config_free(&g->conf);
+    mbedtls_x509_crt_free(&g->cacert);
     mbedtls_ctr_drbg_free(&g->drbg);
     mbedtls_entropy_free(&g->entropy);
 }
@@ -472,14 +490,25 @@ static bool send_json(gw_t *g, json_t *root) {
     return rc == 0;
 }
 
+#define GW_IDLE_TEXT "Sur le menu HOME"
+
+/* Payload "d" d'Update Presence (op 3) :
+ *  - en jeu   : status "online" + activité type 0 -> "Joue à <jeu>"
+ *  - menu HOME: status "idle" + statut personnalisé (type 4, champ "state",
+ *    seul type de texte libre affiché pour un compte utilisateur) ->
+ *    "Sur le menu HOME". Remplace le statut perso de l'utilisateur tant que
+ *    le sysmodule tourne (voir RAPPORT.md).
+ *  - inconnu  : status "online", aucune activité. */
 static json_t *build_presence_d(const presence_state_t *st) {
     json_t *activities = json_array();
+    const char *status = "online";
     if (st && st->kind == PRESENCE_KIND_IN_GAME) {
-        /* Activité type 0 = "Playing <name>" — seul type affiché pour un
-         * compte utilisateur sans application_id. */
         json_array_append_new(activities, json_pack("{s:s, s:i}", "name", st->game_name, "type", 0));
+    } else if (st && st->kind == PRESENCE_KIND_IDLE) {
+        status = "idle";
+        json_array_append_new(activities, json_pack("{s:s, s:i, s:s}", "name", "Custom Status", "type", 4, "state", GW_IDLE_TEXT));
     }
-    return json_pack("{s:n, s:o, s:s, s:b}", "since", "activities", activities, "status", "online", "afk", 0);
+    return json_pack("{s:n, s:o, s:s, s:b}", "since", "activities", activities, "status", status, "afk", 0);
 }
 
 static void send_heartbeat(gw_t *g) {
@@ -516,7 +545,8 @@ static void send_resume(gw_t *g) {
 static void send_presence_update(gw_t *g, const presence_state_t *st) {
     send_json(g, json_pack("{s:i, s:o}", "op", 3, "d", build_presence_d(st)));
     s_lastPresenceSentAt = gw_now_ms();
-    GW_LOG("UPDATE PRESENCE envoyé (%s)", st->kind == PRESENCE_KIND_IN_GAME ? st->game_name : "idle");
+    GW_LOG("UPDATE PRESENCE envoyé (%s)", st->kind == PRESENCE_KIND_IN_GAME ? st->game_name :
+                                          st->kind == PRESENCE_KIND_IDLE ? "idle: " GW_IDLE_TEXT : "unknown");
 }
 
 static void on_ready(gw_t *g, const char *sid, const char *rurl) {
@@ -615,6 +645,9 @@ static void handle_gateway_event(gw_t *g, const uint8_t *msg, size_t len) {
  * ---------------------------------------------------------------------- */
 static void run_session(gw_t *g) {
     const char *host = (g->resume_on_reconnect && g->resume_host[0]) ? g->resume_host : GW_DEFAULT_HOST;
+#ifndef __3DS__
+    if (getenv("TRICORD_GW_HOST")) host = getenv("TRICORD_GW_HOST"); /* test hôte : hôte hors bundle CA */
+#endif
     GW_LOG("connexion à %s", host);
 
     g->fd = tcp_connect(host);

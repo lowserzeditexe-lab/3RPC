@@ -31,3 +31,10 @@ réinstaller via tools/env.sh + tools/build_host_tools.sh + build.sh si le pod e
 P0 : validation sur console (APT depuis sysmodule, MemoryType, IPC, OSD), lancement au boot (exheader deps ou autorun)
 P1 : vérification TLS (CA), Sec-WebSocket-Accept, README utilisateur final, URL réelle du .cia + QR
 P2 : UI graphique de l'installeur, icône/bannière, désinstallation
+
+## Itération 2 (juin 2026)
+- RAPPORT.md §0 : clarification — test gateway hôte = faux token, IDENTIFY rejeté 4004 ; seuls TLS/WS/HELLO/CLOSE validés
+- TLS : VERIFY_REQUIRED + bundle CA embarqué (tools/gen_ca_bundle.py → discord_ca_bundle.h), testé accepté/refusé sur hôte
+- Presence idle : status "idle" + custom status type 4 "Sur le menu HOME"
+- QR : placeholder conservé (pas de repo GitHub)
+- Auto-boot exheader.bin : mécanisme + risque expliqués à l'utilisateur, EN ATTENTE de sa validation avant code
